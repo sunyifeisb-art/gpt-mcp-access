@@ -1,65 +1,126 @@
 # gpt-mcp-access
 
-把任意 MCP（本地 stdio 或远程 HTTP）暴露给 **ChatGPT 网页端（Web GPT）** 连接的完整方案与可复用模板。
+把本地或私有 MCP 稳定接入 **ChatGPT 网页端** 的方法、模板和真实排障记录。
 
-> 沉淀自真实踩坑：把腾讯 IMA（本地 stdio MCP）和元典（远程 HTTP MCP）接入 ChatGPT 网页端全过程的架构、认证、隧道、以及与 `@modelcontextprotocol/sdk` / DevSpace / Cloudflare 打交道踩过的每一个坑。
+当前推荐架构已经更新为：
 
-## 这是什么
+```text
+ChatGPT Connector
+    ↓ OpenAI control plane
+OpenAI Secure MCP Tunnel（本机主动访问 api.openai.com:443）
+    ↓ loopback
+本地 MCP / 认证 shim / 按需唤醒网关
+```
 
-ChatGPT 网页端**只能连「远程 HTTP MCP」**（HTTPS 地址 + OAuth 授权），不能 spawn 本地进程。所以任何本地 MCP 想给网页端用，都必须变成"远程 HTTP + OAuth"。本仓库给出：
+这与旧版“Cloudflare 公网域名 + 自建 OAuth bridge”不同：主链路不要求固定公网 IP、不需要路由器端口映射，也不再依赖 Cloudflare edge 的 `7844` 出站质量。Cloudflare 方案仍保留在仓库中，作为兼容旧部署或无法使用 OpenAI Tunnel 时的备选。
 
-- **完整方法论**：stdio MCP 怎么桥接、远程 HTTP MCP 怎么薄包装、OAuth 单 owner 密码怎么做。
-- **隧道两种方案**：有域名（Cloudflare 命名隧道，稳定 URL）/ 无域名（trycloudflare 快速隧道）。
-- **真实错误库**：`502 / 530 / 1033 / invalid_client / IMA_AUTH_EXPIRED / trust proxy` 等逐一对应的根因与修复。
-- **可复用模板**：`scripts/` 里的桥接、OAuth 持久化、IMA 扫码登录、启动脚本。
+> 本仓库记录的是 2026-08-31 在 macOS 上实际跑通并完成断线排查、自动唤醒和空闲回收验证的架构。OpenAI Tunnel 是否可用取决于组织/账号是否显示对应功能与权限，请以本机 `tunnel-client help quickstart` 与 OpenAI Platform 的 Tunnels 页面为准。
+
+## 能解决什么
+
+- ChatGPT 网页端调用本地 HTTP MCP 或 stdio MCP。
+- 笔记本在不同 Wi-Fi、手机热点和代理网络之间切换，不依赖公网 IP 固定。
+- 一个 MCP 永久常驻；另一些 MCP 只在 GPT 调用时启动，5 分钟无请求后关闭。
+- 本地 MCP 需要 bearer token/OAuth 时，通过 loopback shim 或轻量网关注入，不把凭证暴露给 ChatGPT。
+- 排查 `Failed to fetch template`、`does not implement OAuth`、400/502/530/1033、隧道在线但后端未启动等问题。
+
+## 推荐路径
+
+| 场景 | 推荐连接方式 |
+|---|---|
+| 本地 HTTP MCP，无认证 | `tunnel-client` 直接指向 `127.0.0.1:<port>/mcp` |
+| 本地 stdio MCP | `tunnel-client init --sample sample_mcp_stdio_local` |
+| 本地 HTTP MCP，有内部认证 | OpenAI Tunnel → loopback shim → MCP |
+| 后端不想常驻 | OpenAI Tunnel → 常驻轻量网关 → 按需后端 |
+| 账号没有 OpenAI Tunnels | Cloudflare/其他公网 HTTPS 隧道作为备选 |
+
+## 快速开始：OpenAI Secure MCP Tunnel
+
+1. 在 [OpenAI Platform Tunnels](https://platform.openai.com/settings/organization/tunnels) 创建 tunnel。
+2. 创建**运行时 API key**，运行 tunnel-client 的主体需要 `Tunnels Read + Use`；不要把 Admin key 交给常驻 daemon。
+3. 生成配置并先做 doctor：
+
+   ```bash
+   tunnel-client init \
+     --sample sample_mcp_remote_no_auth \
+     --profile local-mcp \
+     --tunnel-id tunnel_REPLACE_ME \
+     --mcp-server-url http://127.0.0.1:3001/mcp
+
+   export CONTROL_PLANE_API_KEY="..."
+   tunnel-client doctor --profile local-mcp --explain
+   tunnel-client run --profile local-mcp
+   ```
+
+4. 检查 `/healthz`、`/readyz`，然后在 [ChatGPT Connectors](https://chatgpt.com/#settings/Connectors) 选择同一个 tunnel。
+5. 本地目标没有 OAuth/PRMD metadata 时，连接器选择 **No Authentication / 无身份验证**；不要强行选择 OAuth。
+
+完整说明见 [OpenAI Secure MCP Tunnel](references/openai-secure-tunnel.md)。
+
+## 按需启动与五分钟空闲关闭
+
+仓库提供可直接改造的模板：
+
+- [`scripts/on-demand-mcp-gateway.mjs`](scripts/on-demand-mcp-gateway.mjs)：常驻轻量 loopback 网关。
+- [`examples/scripts/backend.example.sh`](examples/scripts/backend.example.sh)：真实 MCP 后端启动器。
+- [`examples/scripts/on-demand-gateway.example.sh`](examples/scripts/on-demand-gateway.example.sh)：网关环境配置。
+- [`examples/tunnel-client/http-on-demand.yaml`](examples/tunnel-client/http-on-demand.yaml)：OpenAI tunnel-client profile。
+- [`examples/launchd/`](examples/launchd/)：macOS LaunchAgent 模板。
+
+数据面流程：
+
+```text
+OpenAI Tunnel（常驻）
+    ↓
+on-demand gateway（常驻，资源占用很小）
+    ↓ 首次 /mcp 请求时启动
+真实 MCP backend（按需）
+    ↓ 300 秒无请求且无活跃 SSE
+关闭整个 backend 进程组
+```
+
+```bash
+node scripts/test-on-demand-gateway.mjs
+```
+
+详见 [按需生命周期](references/on-demand-lifecycle.md)。
 
 ## 目录
 
-```
-SKILL.md            主文档（先读这个）
+```text
+SKILL.md
 references/
-  architecture.md   架构 + 桥接代码要点（stdio vs 远程 HTTP）
-  no-domain.md      无域名方案（trycloudflare / ngrok / DevSpace）
-  cloudflare-tunnel.md 域名 + 命名隧道 + 网络层坑
-  oauth-auth.md     Owner 密码 OAuth + 持久化 + ChatGPT client 缓存
-  pitfalls-errors.md 错误排查速查表
-  github-projects.md 涉及的开源项目
+  openai-secure-tunnel.md  当前首选连接方式
+  on-demand-lifecycle.md   按需拉起、空闲关闭与 macOS 托管
+  architecture.md          MCP 类型、shim/bridge 选择
+  pitfalls-errors.md       新旧两套链路错误速查
+  cloudflare-tunnel.md     旧 Cloudflare 方案（备选）
+  no-domain.md             临时公网隧道（备选）
+  oauth-auth.md            自建 OAuth bridge（兼容旧部署）
 scripts/
-  bridge-stdio.mjs      stdio→远程 OAuth 桥接（IMA 用）
-  bridge-remote-http.mjs 远程 HTTP MCP OAuth 包装（元典用）
-  state-store.mjs       OAuth client/token JSON 持久化
-  ima-login.mjs         Playwright 扫码登录抓 cookie（IMA）
-  ima-web-serve.sh      幂等 start/status/health/stop
-  test-autoauth.mjs     未知 client 全链路授权测试
+  on-demand-mcp-gateway.mjs
+  test-on-demand-gateway.mjs
+  bridge-stdio.mjs
+  bridge-remote-http.mjs
+  state-store.mjs
+examples/
+  tunnel-client/
+  scripts/
+  launchd/
 ```
 
-## 安装为 Skill（Claude Code）
+## 安全边界
 
-```bash
-cp -r gpt-mcp-access ~/.claude/skills/
-# 或单独参考：按 SKILL.md 的结构在 ~/.claude/skills/ 下建同名目录
-```
+- tunnel ID 可以写配置；运行时 API key、Admin key、owner 密码、API key、Cookie、bearer token 不得提交。
+- 推荐使用 macOS Keychain、`env:VAR` 或 `file:/path` 引用凭证。
+- tunnel-client 的健康/UI 默认只监听 `127.0.0.1`；不要无意使用 `--allow-remote-ui`。
+- `--log.http-raw-unsafe` 可能记录请求体和敏感头，只能短时调试，不能作为常驻设置。
 
-## 快速开始（3 分钟思路版）
+## 旧方案如何处理
 
-1. 判断源 MCP 类型：本地 stdio（`ps` 有子进程）还是远程 HTTP（`curl` 上游能回 MCP 信息）。
-2. 复制对应脚本模板，填好 env（owner 密码、API key、cookie 等，都走环境变量/本地文件，**勿提交仓库**）。
-3. 起隧道：`cloudflared tunnel --url http://127.0.0.1:<port>`（无域名，临时 URL）或命名隧道（有域名，稳定 URL）。
-4. ChatGPT 网页端添加 MCP URL + 输 owner 密码授权。
+已有 `gpt.bytelegal.cn` 一类域名不等于 ChatGPT 当前仍从该域名传输。迁移到 OpenAI Secure MCP Tunnel 后，域名可以继续服务其他客户端或保留兼容配置，但 ChatGPT Connector 的主路径已经变为 OpenAI control plane → 本机 tunnel-client。
 
-详见 `SKILL.md`。
-
-## 安全
-
-- **不含任何真实密钥**：所有脚本通过环境变量 / 本地文件读取凭证，仓库内只有 `${...}` 占位与说明。
-- Owner 密码、API Key、Cookie 都是机密，永远放本地配置，**不要提交**。
-
-## 技术栈 / 致谢
-
-- [@modelcontextprotocol/sdk](https://www.npmjs.com/package/@modelcontextprotocol/sdk) —— MCP 官方 SDK
-- [@waishnav/devspace](https://github.com/waishnav/devspace) —— OAuth 模式参考（GPT 连本机的成品）
-- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) —— 隧道
-- 腾讯 IMA / 元典 open.chineselaw.com —— 上游法律/知识库 MCP
+Cloudflare 文档和 OAuth bridge 模板没有删除，避免破坏历史部署；它们已明确标成 fallback/legacy，不应再作为换网断线问题的第一修复方向。
 
 ## License
 

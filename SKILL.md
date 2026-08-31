@@ -1,100 +1,140 @@
 ---
 name: gpt-mcp-access
-description: 把任意 MCP（本地 stdio 或远程 HTTP）暴露给 ChatGPT 网页端（Web GPT）连接的完整方案。含 DevSpace 模式、stdio→远程OAuth桥接、远程MCP OAuth包装、Cloudflare隧道(有/无域名)、owner密码OAuth、ChatGPT缓存在client_id、常见错误与修复。When user wants to connect a local/remote MCP (IMA/元典/自定义) to the web-based GPT, or debug why a GPT-MCP connection fails.
+description: 把本地/私有 MCP 连接到 ChatGPT 网页端并排查断线。当前优先使用 OpenAI Secure MCP Tunnel（443 主动出站），支持常驻 MCP、认证 shim、按需拉起与 5 分钟空闲关闭；Cloudflare + 自建 OAuth 仅作兼容备选。Use when connecting IMA/元典/DevSpace/custom MCP to ChatGPT, or diagnosing template fetch, OAuth, tunnel, network-switch, and local lifecycle failures.
 ---
 
-# GPT 接入 MCP —— 把 MCP 暴露给 ChatGPT 网页端（Web GPT）
+# GPT 网页端接入本地 MCP
 
-本 skill 沉淀了「如何让 ChatGPT 网页端能用上本地/远程的 MCP」，涵盖从零到一的全流程、真实踩过的坑、以及可复用的脚本模板。
+## 一、默认判断：先看是不是 OpenAI Tunnel
 
-## 一、最核心的认知（先读这个，否则方向会错）
+当前首选拓扑：
 
-1. **ChatGPT 网页端只能连「远程 HTTP MCP」**：一个 HTTPS 地址 + OAuth 授权。它**永远不能** spawn 本地子进程。
-2. 所以任何本地 MCP 想给网页端用，**必须**变成"远程 HTTP + OAuth"。这一步绕不开。
-3. MCP 源分两种，工作量差别巨大：
-   - **stdio MCP**（本地子进程，如 legalwork 的 IMA Python）：需要**完整桥接**（spawn 子进程 + 转发 + OAuth）。
-   - **远程 HTTP MCP**（如元典 `open.chineselaw.com`、北大法宝 `apim-gateway.pkulaw.com`）：已经是远程 HTTP，只需**极薄 OAuth 包装**（转发 + 注入 `Authorization: Bearer` 头）。**没有登录、没有 cookie、没有扫码。**
-4. **DevSpace**（`@waishnav/devspace`）是这个模式的权威成品：让 ChatGPT 网页端连本机读文件/跑 shell。**我们的桥接直接复刻它的 OAuth「单 Owner 密码」授权模式。**
-
-## 二、架构（三层）
-
-```
-ChatGPT 网页端 (MCP Client)
-   │  HTTPS + OAuth (owner 密码授权)
-   ▼
-[隧道] Cloudflare / trycloudflare —— 把本地端口暴露成公网 URL
-   │
-   ▼
-[桥接] Node + @modelcontextprotocol/sdk
-   │  OAuth 授权 + 转发 tools/call
-   ├──► [源 MCP: stdio]  Python/Node 子进程（ima-mcp-server.py 等）
-   └──► [源 MCP: 远程HTTP] open.chineselaw.com 等（转发 + 注入 Bearer）
+```text
+ChatGPT Connector
+  → OpenAI MCP control plane
+  → 本机 tunnel-client（主动 HTTPS 443 出站）
+  → 127.0.0.1 本地 MCP / shim / on-demand gateway
 ```
 
-- **隧道**解决"本地端口 → 公网可访问"。
-- **桥接**解决"ChatGPT 只认 OAuth 远程 MCP"的认证 + 传输问题。
-- **源 MCP**提供真正的工具能力。
+处理任何“GPT MCP 断了”时，先检查这套链路，不要一上来改 Cloudflare、域名、Shadowrocket fake-IP 或公网 IP。
 
-## 三、快速上手（三选一的路径）
+只有以下情况才优先读旧方案：
 
-选 A：**远程 HTTP MCP（最省事，元典/北大法宝这种）** —— 见 `references/architecture.md`
-选 B：**本地 stdio MCP（IMA 这种）** —— 见 `references/architecture.md`
-选 C：**只用 DevSpace 直连本机，不额外搭 MCP** —— 不在此范围，看 `references/github-projects.md` 的 DevSpace 链接。
+- 用户明确说当前连接器填的是公网 URL/域名；
+- 账号没有 Tunnels 功能；
+- 现有部署必须继续兼容 Cloudflare/自建 OAuth bridge。
 
-通用 4 步：
-1. 明确源 MCP 类型 + 拿到凭证（API key / cookie / token）。
-2. 用 `scripts/` 里的模板复制一个 bridge，配好 env。
-3. 起隧道（有域名 → Cloudflare 命名隧道；无域名 → trycloudflare 快速隧道）。详见 `references/cloudflare-tunnel.md` 和 `references/no-domain.md`。
-4. ChatGPT 网页端添加 MCP URL + 输 owner 密码授权。
+## 二、四种接入形态
 
-## 四、认证模型（owner 密码，DevSpace 模式）
+### A. 本地 HTTP MCP、无认证
 
-- 网页端连 MCP 走 **OAuth 授权码 + PKCE**。
-- 服务端用来鉴权的是**一个 Owner 密码**（`SingleUserOAuthProvider`，复刻自 DevSpace）。授权页是「Connect <name> + Owner password」表单，密码对了才发授权码。
-- **两个致命坑（必须处理，否则网页端连不上）：**
-  1. **ChatGPT 会永久缓存 client_id**（DCR 注册的），删了重加也**不重新注册**。一旦服务端重启把 client 丢了（内存存储时），它就永远 `invalid_client`。→ **方案：OAuth client/token 用 JSON 持久化**（`scripts/state-store.mjs`，同步写），**且自定义 `/authorize` 自动放行任何 client_id**（owner 密码才是真正的门）。详见 `references/oauth-auth.md`。
-  2. token 存内存 → 每次重启失效 → 网页端每次都要重授权。→ **持久化解决**。
+直接用 tunnel-client 指向 loopback：
 
-## 五、隧道（有 / 无域名）
+```bash
+tunnel-client init \
+  --sample sample_mcp_remote_no_auth \
+  --profile local-http \
+  --tunnel-id tunnel_REPLACE_ME \
+  --mcp-server-url http://127.0.0.1:3001/mcp
 
-- **有域名**：Cloudflare **命名隧道**（named tunnel），route 用 **「Published application routes」**（不是 Hostname routes，那是私网）。URL 永久稳定。脚本：`cloudflared tunnel run --protocol http2 --token <token>`。
-- **无域名**：cloudflared **快速隧道**（`trycloudflare.com`），一条命令给临时 URL（`https://xxx.trycloudflare.com`）。**URL 每次重启会变**，网页端需每次重加。详见 `references/no-domain.md`。
-- **境内关键**：http2(不要 QUIC)，否则反复断。详见 `references/cloudflare-tunnel.md`。
+export CONTROL_PLANE_API_KEY="..."
+tunnel-client doctor --profile local-http --explain
+tunnel-client run --profile local-http
+```
 
-## 六、错误排查速查表（真实踩过）
+ChatGPT Connector 选择同一 tunnel；本地 MCP 不实现 OAuth 时选 **No Authentication**。
 
-| 症状 | 根因 | 修复 |
+### B. 本地 stdio MCP
+
+tunnel-client 可以直接启动 stdio 命令：
+
+```bash
+tunnel-client init \
+  --sample sample_mcp_stdio_local \
+  --profile local-stdio \
+  --tunnel-id tunnel_REPLACE_ME \
+  --mcp-command "python /absolute/path/server.py"
+```
+
+如果要求“5 分钟不用就关”，不要把重后端直接当永久 tunnel 进程；使用 C 的常驻轻网关 + 按需后端结构。
+
+### C. 按需后端
+
+- tunnel-client 常驻；
+- `scripts/on-demand-mcp-gateway.mjs` 常驻；
+- 真正 MCP 只在 `/mcp` 请求到达时启动；
+- 300 秒无请求且没有活跃 SSE/HTTP 请求时关闭整个进程组。
+
+配置见 `references/on-demand-lifecycle.md` 与 `examples/`。
+
+### D. 本地 MCP 自带 OAuth/内部认证
+
+OpenAI Tunnel 不会替本地目标凭空实现 OAuth。三种做法：
+
+1. 本地 MCP 真正实现 OAuth/DCR/PRMD：保留 metadata，ChatGPT 选择 OAuth。
+2. ChatGPT 连接器选 No Authentication，由 loopback shim 在本机注入 bearer token（推荐用于单机私有后端）。
+3. 旧公网部署继续使用本仓库的 owner-password OAuth bridge（仅兼容方案）。
+
+## 三、OpenAI Tunnel 标准操作顺序
+
+1. 创建或确认 tunnel：`https://platform.openai.com/settings/organization/tunnels`。
+2. 创建 Runtime API key；常驻 daemon 使用运行时 key，不使用 Admin key。
+3. 用 `tunnel-client init` 或 `examples/tunnel-client/` 建 profile。
+4. `tunnel-client doctor --profile <name> --explain`。
+5. 启动 tunnel-client；长期运行应交给受监督的 runtime/LaunchAgent，不用 `nohup`/`disown` 冒充守护。
+6. 同时看 `/healthz` 和 `/readyz`：health 只代表进程活着，ready 才包含 OAuth discovery 与 MCP probe。
+7. tunnel-client 运行时，在 ChatGPT Connectors 选择同一 tunnel 和正确 workspace。
+8. 用真实 MCP `initialize`、`tools/list` 和至少一个只读工具验证，不用 GET `/mcp` 的 404 判断协议是否坏了。
+
+详见 `references/openai-secure-tunnel.md`。
+
+## 四、最常见的新架构错误
+
+| 症状 | 优先判断 | 修复 |
 |---|---|---|
-| Cloudflare **502** Bad gateway | `app.set("trust proxy", true)` 被 express-rate-limit v7 拒绝 | 改成 `app.set("trust proxy", 1)` |
-| 公网 **530** / 错误码 **1033** / GET **000** | 隧道掉线（cloudflared 连不上 edge，Shadowrocket fake-ip） | 重启 cloudflared，见 `references/cloudflare-tunnel.md` |
-| `invalid_client` / `Invalid client_id` | ChatGPT 缓存 client_id，服务端重启丢了 | 持久化 + 自定义 `/authorize` 自动放行 |
-| `IMA_AUTH_EXPIRED` / 400 "couldn't connect your account" | IMA cookie 过期 | 调 `open_ima_login`/`refresh_ima_auth`，用户扫码 |
-| "stream is not readable" | 全局 `express.json()` 与 createMcpExpressApp 冲突 | 别全局挂 json，用 SDK 自带解析 |
-| registerTool 报 schema 错误 | `inputSchema` 要 Zod，不是 JSON Schema | 用 `jsonSchemaToZod()` 转换 |
-| `Already connected to a transport` | 同一 McpServer 复用了多次 | 每个 session initialize 新建 McpServer |
-| `Client secret is required` | MemoryClientsStore 擅自生成 secret | 公开客户端别生成 secret |
-| 元典 402 | 元力余额不足 | 提示用户，别重试 |
+| `does not implement OAuth` | 目标没有 OAuth metadata，却在连接器选了 OAuth | 改为 No Authentication，或实现真实 OAuth/DCR/PRMD |
+| `/healthz` 200 但仍不可用 | 只验证了 liveness | 看 `/readyz`、MCP probe、同一 tunnel/workspace |
+| `Failed to fetch template` | connector discovery/会话/本地目标任一段失败 | 按 control plane → tunnel → gateway → backend 分层检查 |
+| gateway 显示 `backend: stopped` | 可能只是按需后端空闲 | 发 MCP 请求验证是否自动变为 running |
+| 五分钟后第一次调用 400/404 | 后端重启后旧 MCP session 已失效 | 让客户端重新 initialize；若频繁影响体验，延长 idle 或实现稳定 session gateway |
+| 换 Wi-Fi 后断开 | 长轮询/代理连接未恢复，不是公网 IP 必须固定 | 重启/检查 tunnel-client control-plane poll；无需重配域名 IP |
+| connector 校验失败 | tunnel 未运行、workspace 不匹配或认证类型错 | 保持 daemon 运行，核对 tunnel/workspace/auth |
 
-完整版见 `references/pitfalls-errors.md`。
+完整表见 `references/pitfalls-errors.md`。
 
-## 七、涉及的开源项目 / 技术栈
+## 五、旧 Cloudflare + OAuth 方案
 
-核心见 `references/github-projects.md`：
-- `@modelcontextprotocol/sdk`（MCP 官方 SDK，npm）
-- `@waishnav/devspace`（DevSpace，让 ChatGPT 连本机）
-- `cloudflared`（Cloudflare 隧道）
-- 腾讯 IMA（知识库，社区 `highkay/tencent-ima-copilot-mcp`）
-- 元典 `open.chineselaw.com` / 北大法宝 `apim-gateway.pkulaw.com`（远程 HTTP MCP）
+Cloudflare 方案仍可用，但不是默认：
 
-## 八、可复用脚本模板（scripts/）
+```text
+ChatGPT → 公网 HTTPS 域名 → cloudflared → OAuth bridge → MCP
+```
 
-- `bridge-stdio.mjs` —— stdio→远程 OAuth 桥接（IMA 用）
-- `bridge-remote-http.mjs` —— 远程 HTTP MCP OAuth 包装（元典用，聚合多服务 + 工具加 `<svc>__` 前缀）
-- `state-store.mjs` —— OAuth client/token JSON 持久化
-- `ima-login.mjs` —— Playwright 扫码登录抓 cookie（IMA 专用）
-- `ima-web-serve.sh` —— 幂等 start/status/health/stop
+它依赖公网域名/临时 URL、Cloudflare edge、`7844` 网络质量及自建 OAuth 状态。在 Shadowrocket fake-IP/TUN 或不同网络环境中更容易出现 TLS EOF、530/1033、502 和间歇性断线。
 
-## 九、安全注意
+- 固定域名：`references/cloudflare-tunnel.md`
+- 临时 URL：`references/no-domain.md`
+- owner-password OAuth：`references/oauth-auth.md`
+- 旧 bridge：`scripts/bridge-stdio.mjs`、`scripts/bridge-remote-http.mjs`
 
-- **owner 密码 / API key / cookie 都是机密**：写入本地配置文件或环境变量，**绝不硬编码进仓库**。本仓库脚本全部通过 env / 本地文件读取，不含真实密钥。
-- 文档里的 URL、方法可公开，但 token 一律 `${...}` 占位。
+不要删除旧部署，迁移时先并行验证 OpenAI Tunnel，再切换 ChatGPT Connector。
+
+## 六、安全规则
+
+- 不提交 Runtime/Admin API key、owner 密码、上游 API key、Cookie、bearer token。
+- 优先用 Keychain、环境变量或 `env:` / `file:` 引用。
+- Admin key 只用于 tunnel CRUD；常驻 daemon 只拿 Runtime key。
+- 健康端口、管理 UI、按需 gateway 只监听 `127.0.0.1`。
+- 不长期启用 raw HTTP 日志；它可能包含 PII 和认证头。
+
+## 七、验证完成标准
+
+只有同时满足下列条件才报告成功：
+
+1. tunnel-client `/healthz` 200；
+2. `/readyz` 可解释且无阻断错误；
+3. ChatGPT 使用同一 tunnel/workspace；
+4. MCP `initialize`、`tools/list` 成功；
+5. 至少一个真实只读工具成功；
+6. 按需模式还要验证：空闲关闭、再次请求自动唤醒；
+7. 仓库与日志中无密钥泄露。

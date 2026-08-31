@@ -1,0 +1,11 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log
+*.pid
+*.key
+*.pem
+oauth.json
+creds.json
+runtime-secrets/

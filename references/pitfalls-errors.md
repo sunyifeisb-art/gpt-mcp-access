@@ -1,5 +1,35 @@
 # 错误排查与踩坑记录（真实踩过，逐条修复）
 
+## 零、先确定正在排哪套链路
+
+```text
+新主链路：ChatGPT → OpenAI control plane → tunnel-client → loopback MCP
+旧公网链路：ChatGPT → HTTPS 域名 → cloudflared → OAuth bridge → MCP
+```
+
+如果 ChatGPT Connector 里选的是 OpenAI tunnel，先看本节和 `openai-secure-tunnel.md`，不要先修改 Cloudflare、DNS、Shadowrocket fake-IP 规则。
+
+### OpenAI Tunnel 错误速查
+
+| 症状 | 根因 | 修复 |
+|---|---|---|
+| `does not implement OAuth` | 本地 target 无 OAuth metadata，但 connector 选了 OAuth | 改选 No Authentication；或实现完整 OAuth/DCR/PRMD |
+| `/healthz` 200 仍连不上 | health 只是 liveness | 查 `/readyz`、OAuth discovery、MCP probe、tunnel/workspace 是否一致 |
+| `Failed to fetch template` | connector discovery、control plane、daemon、gateway 或 backend 任一层失败 | 按层检查，不凭一个 502/400猜根因 |
+| gateway `backend: stopped` | 按需后端已正常休眠 | 发 MCP initialize；应自动拉起并变 running |
+| `backend_start_failed` | 启动脚本退出、健康路径/端口错、依赖或凭证失败 | 看 gateway/backend 日志，手工执行 backend wrapper |
+| 空闲后第一条 400/404 | 后端关闭导致旧 MCP session 失效 | 客户端重新 initialize；必要时延长 idle 或做稳定 session gateway |
+| 换网络后断线 | control-plane 长连接/轮询没有恢复，或新网络阻断 443 | 检查 daemon 和 `api.openai.com:443`，必要时重启 tunnel-client；不用改公网 IP |
+| connector 校验失败 | daemon 不在线、tunnel/workspace 不匹配、认证类型错 | 保持 tunnel-client 运行并逐项核对 |
+
+### 正确的健康判断
+
+1. tunnel-client `/healthz`：进程是否活着；
+2. tunnel-client `/readyz`：OAuth discovery/MCP probe；
+3. on-demand gateway `/healthz`：`stopped` 可以是正常空闲；
+4. 真正验证：MCP `initialize`、`tools/list`、一个只读工具；
+5. 不用 GET `/mcp` 的 404 当作 Streamable HTTP 失败证据。
+
 ## 一、桥接代码层错误
 
 | 错误 | 根因 | 修复 |
@@ -22,7 +52,7 @@
 | 每次重启都要重输 owner 密码 | token 存内存 | OAuth token 持久化（`state-store.mjs`） |
 | 502 / 503 授权页 | 见上 trust proxy；或隧道问题（看下表） | 分别处理 |
 
-## 三、隧道 / 网络错误
+## 三、旧 Cloudflare 隧道 / 网络错误
 
 | 症状 | 根因 | 修复 |
 |---|---|---|

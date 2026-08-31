@@ -1,4 +1,6 @@
-# OAuth 认证：owner 密码模型 + 持久化 + 自动放行
+# 自建 OAuth：owner 密码模型（兼容旧公网部署）
+
+> 迁移到 OpenAI Secure MCP Tunnel 后，本地目标若不实现 OAuth，ChatGPT Connector 应选择 **No Authentication**，再由本机 loopback shim 注入内部凭证。只有维护旧公网 URL bridge，或本地目标确实需要完整 OAuth/DCR/PRMD 时，才使用本页。
 
 ## 一、模型（复刻 DevSpace 的 SingleUserOAuthProvider）
 

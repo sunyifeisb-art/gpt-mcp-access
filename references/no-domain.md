@@ -1,6 +1,8 @@
-# 无域名怎么给 GPT 接入 MCP
+# 无域名公网隧道（兼容/临时验证）
 
-如果你**没有域名**（或不想备案/不想绑定 Cloudflare 免费套餐），用 **Cloudflare 快速隧道（TryCloudflare / Quick Tunnel）**——一条命令拿到**临时公网 HTTPS URL**，Web GPT 直接加这个 URL 就能连。
+> OpenAI Tunnels 可用时，优先使用 `references/openai-secure-tunnel.md`，不需要域名，也不需要临时公网 URL。本页只保留给没有 Tunnels 权限或需要验证旧公网 bridge 的场景。
+
+在旧公网接入模式中，如果你**没有域名**，可以用 **Cloudflare 快速隧道（TryCloudflare / Quick Tunnel）**拿到临时公网 HTTPS URL。
 
 ## 一、试通再管域名：最快路径（推荐先跑这个）
 
@@ -58,10 +60,10 @@ Your quick Tunnel has been created! Visit it at https://<random>.trycloudflare.c
   cloudflared tunnel --protocol http2 --url http://127.0.0.1:3001
   ```
 
-## 五、什么时候必须上域名
+## 五、旧公网方案什么时候需要上域名
 
-- 你想**一次授权长期用**（URL 不变）。
+- 你明确要继续使用旧公网 URL，并希望**一次授权长期用**（URL 不变）。
 - 你有多个 MCP（IMA + 元典）要长期暴露，需要各自稳定的 `xxx.bytelegal.cn`。
 - Web GPT 已缓存 client_id，换 URL 会逼它重新注册——所以**稳定 URL 能少折腾**。
 
-有域名后 → `references/cloudflare-tunnel.md`（Cloudflare 命名隧道，稳定 URL）。
+如果只是让 ChatGPT Connector 访问本地 MCP，不必为了稳定 URL 专门购买/迁移域名；优先改用 `references/openai-secure-tunnel.md`。只有继续旧公网部署时，才进入 `references/cloudflare-tunnel.md`。

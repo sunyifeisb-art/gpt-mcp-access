@@ -1,6 +1,8 @@
-# Cloudflare 隧道（有域名，稳定 URL）
+# Cloudflare 隧道（兼容/备选，不是当前首选）
 
-无域名走 `references/no-domain.md`；有域名用 **命名隧道（Named Tunnel）**，URL 永久稳定。
+> 当前首选是 `references/openai-secure-tunnel.md`。本页只用于：账号没有 OpenAI Tunnels、必须保留公网域名入口、或维护历史 Cloudflare 部署。若 ChatGPT Connector 已经选择 OpenAI tunnel，不要再按本页修改域名/Cloudflare 路由。
+
+旧公网方案中，无域名走 `references/no-domain.md`；有域名用 **命名隧道（Named Tunnel）**，URL 稳定。
 
 ## 一、命名隧道原理
 

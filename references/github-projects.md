@@ -2,6 +2,13 @@
 
 ## 核心依赖
 
+### 0. OpenAI `tunnel-client`（当前首选）
+- **作用**：把本地或私有 MCP 通过主动出站连接挂到 OpenAI MCP control plane，供 ChatGPT Connector 选择。
+- **管理入口**：`https://platform.openai.com/settings/organization/tunnels`。
+- **本机帮助**：`tunnel-client help quickstart`、`help oauth`、`help troubleshooting`、`help samples`。
+- **关键点**：Runtime API key 与 Admin key 分离；同时检查 `/healthz` 和 `/readyz`；本地无 OAuth metadata 时，ChatGPT 选择 No Authentication。
+- **本仓库模板**：`references/openai-secure-tunnel.md`、`examples/tunnel-client/`、`scripts/on-demand-mcp-gateway.mjs`。
+
 ### 1. MCP 官方 SDK —— `@modelcontextprotocol/sdk`（npm）
 - **作用**：MCP（Model Context Protocol）服务器/客户端的官方实现。提供 `McpServer`（服务端）、`Client`（客户端）、`StreamableHTTPClientTransport`（远程 HTTP）、`StdioClientTransport`（本地子进程）、`createMcpExpressApp`、`mcpAuthRouter`、`requireBearerAuth`、`SingleUserOAuthProvider` 的接口。
 - **版本**：用 **1.30.0**（跟 DevSpace 一致），API 形态以此为准。新版可能改名（如 `Client` 曾叫别样）。
@@ -10,14 +17,14 @@
 
 ### 2. DevSpace —— `@waishnav/devspace`（GitHub: waishnav/devspace）
 - **作用**：自托管 MCP server，让 ChatGPT 网页/手机端连本机读文件、跑 shell。是"GPT 连本机"的成品。
-- **为什么重要**：我们的桥接**复刻它的 OAuth 模式**（`SingleUserOAuthProvider` + owner 密码 + `createMcpExpressApp` + `mcpAuthRouter` + `/mcp` session 生命周期）。读它源码（`dist/server.js`、`oauth-provider.js`）能拿到一整套已验证的接线方法。
+- **为什么重要**：它仍是本地 MCP/OAuth 实现参考；当前 ChatGPT 主传输可以改走 OpenAI Tunnel，本地认证则由 shim 兼容处理。
 - **部署**：`npm i -g @waishnav/devspace`；它自带临时隧道（trycloudflare）或可配固定域名。
 - **固定地址示例**：`https://gpt.bytelegal.cn/mcp`（Cloudflare 命名隧道 + www 域名）。
 
-### 3. Cloudflared —— `cloudflared`（Cloudflare）
-- **作用**：本地到 Cloudflare 的连接器，提供命名隧道（稳定域名）和快速隧道（trycloudflare 临时 URL）。
+### 3. Cloudflared —— `cloudflared`（Cloudflare，兼容/备选）
+- **作用**：旧公网部署中提供命名隧道（稳定域名）和快速隧道（trycloudflare 临时 URL）。
 - **npm/homebrew**：`brew install cloudflared`。
-- **关键坑**：境内用 `--protocol http2`（QUIC 会被限流）；路由在「Published application routes」。
+- **关键坑**：网络/代理对 Cloudflare edge 连接的影响是旧方案主要不稳定源；OpenAI Tunnel 可用时不要再把它作为首选。
 
 ## 上游 MCP 数据源（远程或社区）
 
@@ -42,10 +49,11 @@
 
 | 项目 | 链接 | 说明 |
 |---|---|---|
+| OpenAI Tunnels | platform.openai.com/settings/organization/tunnels | 当前首选，ChatGPT 到本地 MCP 的控制面隧道 |
 | DevSpace | github.com/waishnav/devspace | 自托管 MCP，GPT 连本机 |
 | MCP SDK | npmjs.com/package/@modelcontextprotocol/sdk | MCP 官方 SDK |
 | tencent-ima-copilot-mcp | github.com/highkay/tencent-ima-copilot-mcp | IMA 社区 MCP（Cookie/Q&A 参考） |
-| cloudflared | Cloudflare | 隧道 |
+| cloudflared | Cloudflare | 旧公网隧道备选 |
 | ima-cli | npmjs.com/package/ima-cli | IMA CLI |
 | 元典 | open.chineselaw.com | 远程法律 MCP |
 | 北大法宝 | mcp.pkulaw.com / apim-gateway.pkulaw.com | 远程法律 MCP |
