@@ -1,6 +1,6 @@
 # gpt-mcp-access
 
-把本地或私有 MCP 稳定接入 **ChatGPT 网页端** 的方法、模板和真实排障记录。
+把本地或私有 MCP 稳定接入 **ChatGPT 网页端** 的方法、模板和真实排障记录；同时支持把 **ChatGPT Web 直接作为 Codex 原生模型** 使用。
 
 当前推荐架构已经更新为：
 
@@ -19,15 +19,44 @@ OpenAI Secure MCP Tunnel（本机主动访问 api.openai.com:443）
 ## 能解决什么
 
 - ChatGPT 网页端调用本地 HTTP MCP 或 stdio MCP。
+- **Codex 原生模型选择器直接使用 ChatGPT Web**，保留 Codex 任务、上下文和流式 UI。
+- ChatGPT Plus 账户按权限只暴露 `Instant / Medium / High`，不伪造 `Extra High / Pro`。
 - 笔记本在不同 Wi-Fi、手机热点和代理网络之间切换，不依赖公网 IP 固定。
 - 一个 MCP 永久常驻；另一些 MCP 只在 GPT 调用时启动，5 分钟无请求后关闭。
 - 本地 MCP 需要 bearer token/OAuth 时，通过 loopback shim 或轻量网关注入，不把凭证暴露给 ChatGPT。
 - 排查 `Failed to fetch template`、`does not implement OAuth`、400/502/530/1033、隧道在线但后端未启动等问题。
 
+## Codex 内直接使用 Web GPT（Plus）
+
+新增的 Codex 路由与原有通用 MCP tunnel **并存**：
+
+```text
+Codex task
+  → local Responses bridge
+  → ChatGPT Web（Plus：Instant / Medium / High）
+  → 可选 Codex Native2 专用 tunnel
+  → 当前 Codex task 的本地工具
+```
+
+macOS 安装：
+
+```bash
+./scripts/install-codex-webgpt-plus.sh
+```
+
+首次登录并安装模型后，检查：
+
+```bash
+./scripts/codex-webgpt-status.sh
+```
+
+完整设计、Full Harness 与现有 tunnel 的并存规则见 [`references/codex-webgpt-plus.md`](references/codex-webgpt-plus.md)。
+
 ## 推荐路径
 
 | 场景 | 推荐连接方式 |
 |---|---|
+| Codex 里直接使用 ChatGPT Web（Plus） | `scripts/install-codex-webgpt-plus.sh` → Web GPT launcher → Codex 原生模型 |
 | 本地 HTTP MCP，无认证 | `tunnel-client` 直接指向 `127.0.0.1:<port>/mcp` |
 | 本地 stdio MCP | `tunnel-client init --sample sample_mcp_stdio_local` |
 | 本地 HTTP MCP，有内部认证 | OpenAI Tunnel → loopback shim → MCP |
@@ -90,14 +119,17 @@ node scripts/test-on-demand-gateway.mjs
 ```text
 SKILL.md
 references/
-  openai-secure-tunnel.md  当前首选连接方式
-  on-demand-lifecycle.md   按需拉起、空闲关闭与 macOS 托管
-  architecture.md          MCP 类型、shim/bridge 选择
-  pitfalls-errors.md       新旧两套链路错误速查
-  cloudflare-tunnel.md     旧 Cloudflare 方案（备选）
-  no-domain.md             临时公网隧道（备选）
-  oauth-auth.md            自建 OAuth bridge（兼容旧部署）
+  codex-webgpt-plus.md      Codex 原生 Web GPT（Plus）与 Full Harness
+  openai-secure-tunnel.md   当前首选连接方式
+  on-demand-lifecycle.md    按需拉起、空闲关闭与 macOS 托管
+  architecture.md           MCP 类型、shim/bridge 选择
+  pitfalls-errors.md        新旧两套链路错误速查
+  cloudflare-tunnel.md      旧 Cloudflare 方案（备选）
+  no-domain.md              临时公网隧道（备选）
+  oauth-auth.md             自建 OAuth bridge（兼容旧部署）
 scripts/
+  install-codex-webgpt-plus.sh
+  codex-webgpt-status.sh
   on-demand-mcp-gateway.mjs
   test-on-demand-gateway.mjs
   bridge-stdio.mjs
@@ -112,7 +144,9 @@ examples/
 ## 安全边界
 
 - tunnel ID 可以写配置；运行时 API key、Admin key、owner 密码、API key、Cookie、bearer token 不得提交。
-- 推荐使用 macOS Keychain、`env:VAR` 或 `file:/path` 引用凭证。
+- ChatGPT Web 登录状态不从 Safari/Chrome/ChatGPT App 抽取或复制；首次在 Codex Web GPT 中本人登录。
+- Plus 不伪造 Extra High/Pro capability。
+- 推荐使用 macOS Keychain、环境变量或 `env:` / `file:` 引用凭证。
 - tunnel-client 的健康/UI 默认只监听 `127.0.0.1`；不要无意使用 `--allow-remote-ui`。
 - `--log.http-raw-unsafe` 可能记录请求体和敏感头，只能短时调试，不能作为常驻设置。
 
